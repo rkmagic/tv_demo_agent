@@ -14,7 +14,6 @@ import time
 #os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "tv-demo.json"
 
 # --- N8N Webhook Configuration ---
-# Use the base URL provided by the user, without the "?query=..." part
 DEFAULT_N8N_WEBHOOK_URL = st.secrets["N8N_URL"]
 
 # --- Initialize Speech Recognizer ---
