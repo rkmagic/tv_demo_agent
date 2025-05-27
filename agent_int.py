@@ -7,24 +7,22 @@ from pydub import AudioSegment # For audio format conversion
 import json # To potentially help inspect response, though requests handles most JSON parsing
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request
+from agent_lc import GeminiChat
 import base64
 import os
 import time
 
 #os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "tv-demo.json"
 
-# --- N8N Webhook Configuration ---
-DEFAULT_N8N_WEBHOOK_URL = st.secrets["N8N_URL"]
-
 # --- Initialize Speech Recognizer ---
 r = sr.Recognizer()
 
 # --- Streamlit App ---
-st.set_page_config(layout="wide", page_title="Voice Interaction with N8N Agent")
+st.set_page_config(layout="wide", page_title="Voice Interaction with Fashion Agent")
 
-st.title("🎙️ Voice Interaction with N8N Agent")
+st.title("🎙️ Voice Interaction with Fashion Agent")
 st.markdown("""
-Record your voice query. The app will convert it to text, send it to your N8N webhook agent
+Record your voice query. The app will convert it to text, send it to a Gemini powered langchain agent
 as a query parameter, and display the agent's response.
 """)
 
@@ -34,6 +32,7 @@ def get_token():
             time.time() > st.session_state.token_expiry):
         credentials = service_account.Credentials.from_service_account_info(
             st.secrets["google_credentials"],
+            #"tv-demo.json",
             scopes=['https://www.googleapis.com/auth/cloud-platform']
         )
         request = Request()
@@ -71,7 +70,6 @@ def get_speech(text):
     )
 
     #fetch the audio content
-    print(response.json())
     audio_content = response.json()['audioContent']
 
     # Decode the base64 string
@@ -82,24 +80,47 @@ def get_speech(text):
 def play_audio(audio):
     st.audio(audio, format='audio/mp3')
 
+
+# --- Initialize Gemini Chat ---
+if 'gemini_chat' not in st.session_state:
+    # Replace with your actual Google API key
+    st.session_state.gemini_chat = GeminiChat()
+
 # --- Session State for Chat History ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "n8n_webhook_url" not in st.session_state:
-    st.session_state.n8n_webhook_url = DEFAULT_N8N_WEBHOOK_URL
 
-# --- Sidebar for N8N Webhook URL Configuration ---
+# --- Sidebar for Configuration ---
 with st.sidebar:
     st.header("Configuration")
-    st.session_state.n8n_webhook_url = st.text_input(
-        "N8N Webhook Base URL", # Changed label to clarify it's the base URL
-        value=st.session_state.n8n_webhook_url
-    )
-    if st.session_state.n8n_webhook_url == DEFAULT_N8N_WEBHOOK_URL and "YOUR_N8N_TEST_WEBHOOK_URL_HERE" in DEFAULT_N8N_WEBHOOK_URL:
-         st.warning("Please update the N8N Webhook URL!")
-    elif not st.session_state.n8n_webhook_url.startswith("http"):
-         st.warning("Webhook URL should start with http or https")
+    st.info("Fashion Agent is configured and ready!")
 
+    st.markdown("---")
+    st.subheader("Chat Management")
+
+    # Clear chat history button
+    if st.button("🗑️ Clear Chat History", type="secondary"):
+        st.session_state.gemini_chat.clear_history()
+        st.session_state.messages = []
+        st.success("Chat history cleared!")
+        st.rerun()
+
+    # View chat history from Gemini memory
+    if st.button("📜 View Gemini Memory", type="secondary"):
+        gemini_history = st.session_state.gemini_chat.get_history()
+        if gemini_history:
+            st.write("**Gemini Conversation Memory:**")
+            for i, msg in enumerate(gemini_history):
+                role = "🧑 User" if msg.__class__.__name__ == "HumanMessage" else "🤖 Gemini"
+                st.write(f"**{role}:** {msg.content}")
+                if i < len(gemini_history) - 1:
+                    st.write("---")
+        else:
+            st.info("No conversation history in Gemini memory yet.")
+
+    # Show conversation count
+    gemini_msg_count = len(st.session_state.gemini_chat.get_history())
+    st.metric("Messages in Memory", f"{gemini_msg_count} messages")
 
 # --- Display Chat History ---
 for message in st.session_state.messages:
@@ -113,22 +134,19 @@ audio_bytes = audiorecorder("Click to Speak", "Recording... Click to Stop")
 
 if audio_bytes:
     # Display the recorded audio
-    # Note: This uses the original audio_bytes which is what st.audio expects
     audio_bytes = audio_bytes.export().read()
     st.audio(audio_bytes, format="audio/wav")
 
-    # Convert audio_bytes (likely opus or webm from browser) to WAV for SpeechRecognition
-    text = None # Initialize text variable
+    # Convert audio_bytes to WAV for SpeechRecognition
+    text = None  # Initialize text variable
     try:
-        # audiorecorder gives bytes. We need to know its format to convert.
-        # It's often opus in a webm container. Let's try loading it directly.
         audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
         wav_io = io.BytesIO()
         audio_segment.export(wav_io, format="wav")
-        wav_io.seek(0) # Reset stream position
+        wav_io.seek(0)  # Reset stream position
 
-        with sr.AudioFile(wav_io) as source: # Use the BytesIO stream (wav_io)
-            audio_data = r.record(source) # Read the entire audio file
+        with sr.AudioFile(wav_io) as source:
+            audio_data = r.record(source)  # Read the entire audio file
 
         # Recognize speech using Google Web Speech API
         st.info("Processing speech...")
@@ -141,81 +159,58 @@ if audio_bytes:
         st.error(f"Could not request results from Google Web Speech API; {e}")
     except Exception as e:
         st.error(f"An unexpected error occurred during speech recognition: {e}")
-        st.exception(e) # Display full traceback for other errors
+        st.exception(e)
 
-    # --- Send Recognized Text to N8N Webhook and Handle Response ---
-    if text: # Only proceed if text was successfully recognized
+    # --- Send Recognized Text to Gemini and Handle Response ---
+    if text:  # Only proceed if text was successfully recognized
         # Add user message to chat history
         st.session_state.messages.append({"role": "user", "content": text})
         # Re-display messages to include the new user message immediately
-        # (This is a common Streamlit pattern as the script reruns)
         with st.chat_message("user"):
-             st.markdown(text)
+            st.markdown(text)
 
+        st.info("Sending text to Gemini...")
 
-        if st.session_state.n8n_webhook_url and st.session_state.n8n_webhook_url.startswith("http"):
-            st.info("Sending text to N8N...")
+        try:
+            # Send to Gemini
+            with st.spinner("Getting response from Gemini..."):
+                response = st.session_state.gemini_chat.send_message(text)
 
-            # Prepare the query parameters
-            params = {"query": text}
+            st.success("Successfully received response from Fashion Assistant!")
+            st.info("Fashion Agent says:")
+            st.markdown(response['text'])
 
-            try:
-                # Send POST request with parameters in the query string
-                response = requests.post(st.session_state.n8n_webhook_url, params=params, timeout=20) # Increased timeout slightly
+            # Add text response to chat history
+            st.session_state.messages.append({"role": "assistant", "content": response['text']})
+            with st.chat_message("assistant"):
+                st.markdown(response['text'])
 
-                if response.status_code == 200:
-                    st.success("Successfully sent to N8N. Receiving response...")
-                    try:
-                        # Attempt to parse JSON response
-                        response_data = response.json()
-                        st.write("N8N Raw Response:", response_data) # Optional: show raw response
+            # Extract image URLs from the text response
+            if response['image_urls']:
+                st.markdown("### 👗 Recommended Looks:")
 
-                        # Extract the 'output' key
-                        if "output" in response_data:
-                            n8n_output_text = response_data["output"]
-                            st.info("N8N Agent says:")
-                            st.markdown(n8n_output_text) # Display the agent's output
+                # Create columns for image display
+                cols = st.columns(min(3, len(response['image_urls'])))
 
-                            # Add N8N response to chat history
-                            st.session_state.messages.append({"role": "assistant", "content": n8n_output_text})
-                            # Re-display messages including the assistant's response
-                            with st.chat_message("assistant"):
-                                 st.markdown(n8n_output_text)
+                for idx, image_url in enumerate(response['image_urls']):
+                    with cols[idx % 3]:
+                        try:
+                            st.image(image_url)
+                        except Exception as e:
+                            st.warning(f"Could not load image: {str(e)}")
 
-                            audio=get_speech(n8n_output_text)
-                            with st.container():
-                                st.write("Agent Output")
-                                play_audio(audio)
+            # Generate and play speech
+            audio = get_speech(response['text'])
+            with st.container():
+                st.write("Fashion Agent says")
+                play_audio(audio)
 
-                        else:
-                            error_msg = "N8N response was successful but missing the 'output' key."
-                            st.warning(error_msg)
-                            st.session_state.messages.append({"role": "assistant", "content": error_msg})
-                            with st.chat_message("assistant"):
-                                st.markdown(error_msg)
-
-                    except json.JSONDecodeError:
-                        error_msg = f"Received status 200 from N8N but couldn't parse JSON response. Response text: {response.text[:200]}..."
-                        st.error(error_msg)
-                        st.session_state.messages.append({"role": "assistant", "content": error_msg})
-                        with st.chat_message("assistant"):
-                            st.markdown(error_msg)
-
-                else:
-                    error_msg = f"Error sending to N8N or unexpected status: {response.status_code} - {response.text}"
-                    st.error(error_msg)
-                    st.session_state.messages.append({"role": "assistant", "content": f"N8N Error: {response.status_code}"})
-                    with st.chat_message("assistant"):
-                        st.markdown(f"N8N Error: {response.status_code}")
-
-            except requests.exceptions.RequestException as e:
-                error_msg = f"N8N connection error: {e}"
-                st.error(error_msg)
-                st.session_state.messages.append({"role": "assistant", "content": error_msg})
-                with st.chat_message("assistant"):
-                    st.markdown(error_msg)
-        else:
-            st.warning("N8N Webhook URL is not properly configured. Text not sent.")
+        except Exception as e:
+            error_msg = f"Error communicating with Gemini: {str(e)}"
+            st.error(error_msg)
+            st.session_state.messages.append({"role": "assistant", "content": error_msg})
+            with st.chat_message("assistant"):
+                st.markdown(error_msg)
 
 else:
     st.info("Click the button above to start recording your voice query.")
