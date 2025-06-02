@@ -1,10 +1,10 @@
 import streamlit as st
-from audiorecorder import audiorecorder # For recording audio
-import speech_recognition as sr # For converting speech to text
-import requests # For sending data to N8N
-import io # For handling audio bytes
-from pydub import AudioSegment # For audio format conversion
-import json # To potentially help inspect response, though requests handles most JSON parsing
+from audiorecorder import audiorecorder  # For recording audio
+import speech_recognition as sr  # For converting speech to text
+import requests  # For sending data to N8N
+import io  # For handling audio bytes
+from pydub import AudioSegment  # For audio format conversion
+import json  # To potentially help inspect response, though requests handles most JSON parsing
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request
 from agent_lc import GeminiChat
@@ -26,6 +26,7 @@ Record your voice query. The app will convert it to text, send it to a Gemini po
 as a query parameter, and display the agent's response.
 """)
 
+
 def get_token():
     if ('token' not in st.session_state or
             'token_expiry' not in st.session_state or
@@ -43,19 +44,20 @@ def get_token():
 
     return st.session_state.token
 
+
 def get_speech(text):
     payload = {
-    "input": {
-        "markup": text
-    },
-    "voice": {
-        "languageCode": "en-IN",
-        "name": "en-IN-Chirp3-HD-Zephyr",
-        "voiceClone": {}
-    },
-    "audioConfig": {
-        "audioEncoding": "LINEAR16"
-    }
+        "input": {
+            "markup": text
+        },
+        "voice": {
+            "languageCode": "en-IN",
+            "name": "en-IN-Chirp3-HD-Zephyr",
+            "voiceClone": {}
+        },
+        "audioConfig": {
+            "audioEncoding": "LINEAR16"
+        }
     }
     json_data = json.dumps(payload)
     token = get_token()
@@ -69,7 +71,7 @@ def get_speech(text):
         data=json_data
     )
 
-    #fetch the audio content
+    # fetch the audio content
     audio_content = response.json()['audioContent']
 
     # Decode the base64 string
@@ -77,18 +79,85 @@ def get_speech(text):
 
     return audio_out
 
+
 def play_audio(audio):
     st.audio(audio, format='audio/mp3')
 
 
+def process_audio_and_chat(audio_bytes):
+    """Process audio recording and handle chat interaction"""
+    # Convert audio_bytes to WAV for SpeechRecognition
+    text = None
+    try:
+        audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
+        wav_io = io.BytesIO()
+        audio_segment.export(wav_io, format="wav")
+        wav_io.seek(0)
+
+        with sr.AudioFile(wav_io) as source:
+            audio_data = r.record(source)
+
+        # Recognize speech using Google Web Speech API
+        st.info("Processing speech...")
+        text = r.recognize_google(audio_data)
+        st.success(f"Recognized: {text}")
+
+    except sr.UnknownValueError:
+        st.warning("Google Web Speech API could not understand audio.")
+        return
+    except sr.RequestError as e:
+        st.error(f"Could not request results from Google Web Speech API; {e}")
+        return
+    except Exception as e:
+        st.error(f"An unexpected error occurred during speech recognition: {e}")
+        return
+
+    # Send to Gemini if text was recognized
+    if text:
+        # Add user message to chat history
+        st.session_state.messages.append({"role": "user", "content": text})
+
+        st.info("Sending text to Gemini...")
+
+        try:
+            # Send to Gemini
+            with st.spinner("Getting response from Gemini..."):
+                response = st.session_state.gemini_chat.send_message(text)
+
+            st.success("Successfully received response from Fashion Assistant!")
+
+            # Add assistant response to chat history
+            st.session_state.messages.append({"role": "assistant", "content": response['text']})
+
+            # Store response details for display after rerun
+            st.session_state.latest_response = {
+                'text': response['text'],
+                'image_urls': response.get('image_urls', [])
+            }
+
+            # Set flag to indicate we should process the response
+            st.session_state.show_latest_response = True
+
+            # Force rerun to refresh the UI
+            st.rerun()
+
+        except Exception as e:
+            error_msg = f"Error communicating with Gemini: {str(e)}"
+            st.error(error_msg)
+            st.session_state.messages.append({"role": "assistant", "content": error_msg})
+
+
 # --- Initialize Gemini Chat ---
 if 'gemini_chat' not in st.session_state:
-    # Replace with your actual Google API key
     st.session_state.gemini_chat = GeminiChat()
 
 # --- Session State for Chat History ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+# Initialize audio recording counter to force widget refresh
+if "audio_key" not in st.session_state:
+    st.session_state.audio_key = 0
 
 # --- Sidebar for Configuration ---
 with st.sidebar:
@@ -102,6 +171,11 @@ with st.sidebar:
     if st.button("🗑️ Clear Chat History", type="secondary"):
         st.session_state.gemini_chat.clear_history()
         st.session_state.messages = []
+        st.session_state.audio_key += 1  # Reset audio recorder
+        if 'latest_response' in st.session_state:
+            del st.session_state.latest_response
+        if 'show_latest_response' in st.session_state:
+            del st.session_state.show_latest_response
         st.success("Chat history cleared!")
         st.rerun()
 
@@ -127,90 +201,67 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# --- Audio Recorder ---
+# Display latest response if available
+if st.session_state.get('show_latest_response', False) and 'latest_response' in st.session_state:
+    response = st.session_state.latest_response
+
+    st.info("Fashion Agent says:")
+    st.markdown(response['text'])
+
+    # Display images if available
+    if response['image_urls']:
+        st.markdown("### 👗 Recommended Looks:")
+        cols = st.columns(min(3, len(response['image_urls'])))
+        for idx, image_url in enumerate(response['image_urls']):
+            with cols[idx % 3]:
+                try:
+                    st.image(image_url)
+                except Exception as e:
+                    st.warning(f"Could not load image: {str(e)}")
+
+    # Generate and play speech
+    try:
+        audio = get_speech(response['text'])
+        with st.container():
+            st.write("🔊 Fashion Agent says:")
+            play_audio(audio)
+    except Exception as e:
+        st.warning(f"Could not generate speech: {str(e)}")
+
+    # Clear the flag after displaying
+    st.session_state.show_latest_response = False
+
+# --- Audio Recorder with Dynamic Key ---
 st.markdown("---")
 st.subheader("Record your message:")
-audio_bytes = audiorecorder("Click to Speak", "Recording... Click to Stop")
+
+# Use a dynamic key to refresh the audio recorder widget
+audio_bytes = audiorecorder(
+    "Click to Speak",
+    "Recording... Click to Stop",
+    key=f"audio_recorder_{st.session_state.audio_key}"
+)
 
 if audio_bytes:
-    # Display the recorded audio
-    audio_bytes = audio_bytes.export().read()
-    st.audio(audio_bytes, format="audio/wav")
+    # Check if this is a new recording by comparing with previous
+    current_audio_data = audio_bytes.export().read()
 
-    # Convert audio_bytes to WAV for SpeechRecognition
-    text = None  # Initialize text variable
-    try:
-        audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
-        wav_io = io.BytesIO()
-        audio_segment.export(wav_io, format="wav")
-        wav_io.seek(0)  # Reset stream position
+    # Store hash of current audio to detect new recordings
+    import hashlib
 
-        with sr.AudioFile(wav_io) as source:
-            audio_data = r.record(source)  # Read the entire audio file
+    current_hash = hashlib.md5(current_audio_data).hexdigest()
 
-        # Recognize speech using Google Web Speech API
-        st.info("Processing speech...")
-        text = r.recognize_google(audio_data)
-        st.success(f"Recognized: {text}")
+    if st.session_state.get('last_audio_hash') != current_hash:
+        st.session_state.last_audio_hash = current_hash
 
-    except sr.UnknownValueError:
-        st.warning("Google Web Speech API could not understand audio.")
-    except sr.RequestError as e:
-        st.error(f"Could not request results from Google Web Speech API; {e}")
-    except Exception as e:
-        st.error(f"An unexpected error occurred during speech recognition: {e}")
-        st.exception(e)
+        # Display the recorded audio
+        st.audio(current_audio_data, format="audio/wav")
 
-    # --- Send Recognized Text to Gemini and Handle Response ---
-    if text:  # Only proceed if text was successfully recognized
-        # Add user message to chat history
-        st.session_state.messages.append({"role": "user", "content": text})
-        # Re-display messages to include the new user message immediately
-        with st.chat_message("user"):
-            st.markdown(text)
+        # Process the audio
+        process_audio_and_chat(current_audio_data)
 
-        st.info("Sending text to Gemini...")
-
-        try:
-            # Send to Gemini
-            with st.spinner("Getting response from Gemini..."):
-                response = st.session_state.gemini_chat.send_message(text)
-
-            st.success("Successfully received response from Fashion Assistant!")
-            st.info("Fashion Agent says:")
-            st.markdown(response['text'])
-
-            # Add text response to chat history
-            st.session_state.messages.append({"role": "assistant", "content": response['text']})
-            with st.chat_message("assistant"):
-                st.markdown(response['text'])
-
-            # Extract image URLs from the text response
-            if response['image_urls']:
-                st.markdown("### 👗 Recommended Looks:")
-
-                # Create columns for image display
-                cols = st.columns(min(3, len(response['image_urls'])))
-
-                for idx, image_url in enumerate(response['image_urls']):
-                    with cols[idx % 3]:
-                        try:
-                            st.image(image_url)
-                        except Exception as e:
-                            st.warning(f"Could not load image: {str(e)}")
-
-            # Generate and play speech
-            audio = get_speech(response['text'])
-            with st.container():
-                st.write("Fashion Agent says")
-                play_audio(audio)
-
-        except Exception as e:
-            error_msg = f"Error communicating with Gemini: {str(e)}"
-            st.error(error_msg)
-            st.session_state.messages.append({"role": "assistant", "content": error_msg})
-            with st.chat_message("assistant"):
-                st.markdown(error_msg)
+        # Increment key to refresh audio recorder for next recording
+        st.session_state.audio_key += 1
 
 else:
     st.info("Click the button above to start recording your voice query.")
